@@ -8,6 +8,7 @@ Note: Use Python 3.9-3.12 (Python 3.13 has compatibility issues)
 import asyncio
 import json
 import re
+import os
 import base64
 from datetime import datetime
 from typing import Dict, List, Set, Optional
@@ -1065,7 +1066,7 @@ async def send_recurring_messages(context: ContextTypes.DEFAULT_TYPE):
 # Main function
 def main():
     # Replace with your bot token
-    TOKEN = "YOUR_BOT_TOKEN_HERE"
+    TOKEN = os.getenv("BOT_TOKEN")
     
     application = Application.builder().token(TOKEN).build()
     
