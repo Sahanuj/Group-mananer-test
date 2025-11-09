@@ -7,8 +7,8 @@ Note: Use Python 3.9-3.12 (Python 3.13 has compatibility issues)
 
 import asyncio
 import json
-import re
 import os
+import re
 import base64
 from datetime import datetime
 from typing import Dict, List, Set, Optional
@@ -25,12 +25,12 @@ WAITING_MESSAGE, WAITING_INTERVAL, WAITING_BUTTONS, WAITING_MEDIA = range(4)
 class BotStorage:
     def __init__(self):
         self.data = {
-            "recurring_messages": {},  # group_id: [{msg, interval, media, buttons, last_sent}]
+            "recurring_messages": {},  # group_id: [{msg, interval, media, buttons, delete_previous, pin_message, last_sent, last_message_id}]
             "banned_words": {},  # group_id: [word1, word2...]
             "block_links": {},  # group_id: True/False
             "block_mentions": {},  # group_id: True/False
         }
-        self.temp_messages = {}  # user_id: {text, media, buttons, interval, chat_id}
+        self.temp_messages = {}  # user_id: {text, media, buttons, interval, chat_id, delete_previous, pin_message}
         self.load_data()
     
     def load_data(self):
@@ -165,6 +165,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "edit_message":
         await edit_message_options(query, context)
     
+    # Delete previous option
+    elif data == "opt_delete_yes":
+        await handle_delete_option(query, context, True)
+    elif data == "opt_delete_no":
+        await handle_delete_option(query, context, False)
+    
+    # Pin message option
+    elif data == "opt_pin_yes":
+        await handle_pin_option(query, context, True)
+    elif data == "opt_pin_no":
+        await handle_pin_option(query, context, False)
+    
     # Link blocking toggle
     elif data.startswith("toggle_links_"):
         await toggle_link_blocking(query, context, data)
@@ -225,7 +237,9 @@ async def handle_recurring_action(query, context, data):
             'media_type': None,
             'buttons': [],
             'interval': None,
-            'chat_id': None
+            'chat_id': None,
+            'delete_previous': False,
+            'pin_message': False
         }
         
         text = (
@@ -258,7 +272,9 @@ async def show_recurring_list(query, context):
                 msg_preview = msg.get('text', 'Media message')[:30]
                 has_media = "📸" if msg.get('media') else "📝"
                 has_buttons = "🔘" if msg.get('buttons') else ""
-                text += f"{i+1}. {has_media}{has_buttons} Every {msg['interval']}min: {msg_preview}...\n"
+                delete_prev = "🗑" if msg.get('delete_previous') else ""
+                pin_msg = "📌" if msg.get('pin_message') else ""
+                text += f"{i+1}. {has_media}{has_buttons}{delete_prev}{pin_msg} Every {msg['interval']}min: {msg_preview}...\n"
                 keyboard.append([
                     InlineKeyboardButton(
                         f"🗑 Delete #{i+1} from {chat_id}", 
@@ -270,6 +286,10 @@ async def show_recurring_list(query, context):
     if not has_messages:
         text += "No recurring messages configured yet.\n\n"
         text += "Click 'Add New Message' to create one!"
+    else:
+        text += "\n*Legend:*\n"
+        text += "📸 = Has media | 🔘 = Has buttons\n"
+        text += "🗑 = Deletes previous | 📌 = Auto-pins\n"
     
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu_recurring")])
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -284,6 +304,53 @@ async def delete_recurring_from_button(query, context, data):
     storage.remove_recurring_message(chat_id, index)
     await query.answer("✅ Message deleted!")
     await show_recurring_list(query, context)
+
+# Handle delete previous option
+async def handle_delete_option(query, context, delete: bool):
+    user_id = query.from_user.id
+    
+    if user_id not in storage.temp_messages:
+        await query.answer("❌ No message being created!")
+        return
+    
+    storage.temp_messages[user_id]['delete_previous'] = delete
+    
+    # Ask about pin option
+    keyboard = [
+        [InlineKeyboardButton("📌 Yes, Pin Message", callback_data="opt_pin_yes")],
+        [InlineKeyboardButton("❌ No, Don't Pin", callback_data="opt_pin_no")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "📌 *Auto-Pin Message?*\n\n"
+        "Should the bot automatically pin this message every time it's sent?\n\n"
+        "📌 *Yes:* Message will be pinned (members get notification)\n"
+        "❌ *No:* Message won't be pinned (normal message)\n\n"
+        "*Note:* Bot needs 'Pin Messages' permission!\n\n"
+        "Choose an option:",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+# Handle pin option
+async def handle_pin_option(query, context, pin: bool):
+    user_id = query.from_user.id
+    
+    if user_id not in storage.temp_messages:
+        await query.answer("❌ No message being created!")
+        return
+    
+    storage.temp_messages[user_id]['pin_message'] = pin
+    context.user_data['state'] = 'waiting_interval'
+    
+    await query.edit_message_text(
+        "⏱ *Step 7/7: Interval*\n\n"
+        "How often should I send this message?\n\n"
+        "Send the interval in minutes (minimum 1).\n\n"
+        "*Example:* `10` for every 10 minutes",
+        parse_mode='Markdown'
+    )
 
 # Handle text messages for recurring message creation
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -383,14 +450,23 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
         
+        # Ask about delete previous option
+        keyboard = [
+            [InlineKeyboardButton("✅ Yes, Delete Previous", callback_data="opt_delete_yes")],
+            [InlineKeyboardButton("❌ No, Keep All", callback_data="opt_delete_no")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await update.message.reply_text(
-            "⏱ *Step 5/5: Interval*\n\n"
-            "How often should I send this message?\n\n"
-            "Send the interval in minutes (minimum 1).\n\n"
-            "Example: `10` for every 10 minutes",
+            "🗑 *Delete Previous Message?*\n\n"
+            "Should the bot delete the previous recurring message before sending a new one?\n\n"
+            "✅ *Yes:* Only the latest message stays (cleaner group)\n"
+            "❌ *No:* All messages stay (message history visible)\n\n"
+            "Choose an option:",
+            reply_markup=reply_markup,
             parse_mode='Markdown'
         )
-        context.user_data['state'] = 'waiting_interval'
+        context.user_data['state'] = 'waiting_delete_option'
     
     elif state == 'waiting_interval':
         try:
@@ -459,6 +535,8 @@ async def show_preview(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
     media_type = msg_data.get('media_type')
     buttons = msg_data.get('buttons', [])
     interval = msg_data.get('interval')
+    delete_prev = msg_data.get('delete_previous', False)
+    pin_msg = msg_data.get('pin_message', False)
     
     # Build keyboard
     keyboard = []
@@ -471,12 +549,18 @@ async def show_preview(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
         [InlineKeyboardButton("🔙 Cancel", callback_data="menu_recurring")]
     ]
     
+    settings_info = ""
+    if delete_prev:
+        settings_info += "🗑 Deletes previous message\n"
+    if pin_msg:
+        settings_info += "📌 Auto-pins message\n"
+    
     await update.message.reply_text(
         f"👁 *PREVIEW MODE*\n\n"
-        f"This is how your message will look:\n"
         f"⏱ Interval: Every {interval} minutes\n"
         f"{'📸 Media: Yes' if media else '📝 Text only'}\n"
-        f"{'🔘 Buttons: Yes' if buttons else ''}\n\n"
+        f"{'🔘 Buttons: Yes' if buttons else ''}\n"
+        f"{settings_info}\n"
         f"━━━━━━━━━━━━━━━━",
         parse_mode='Markdown'
     )
@@ -495,6 +579,36 @@ async def show_preview(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
             )
         elif media_type == 'video':
             await context.bot.send_video(
+                chat_id=update.effective_chat.id,
+                video=media,
+                caption=text if text else None,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        elif media_type == 'animation':
+            await context.bot.send_animation(
+                chat_id=update.effective_chat.id,
+                animation=media,
+                caption=text if text else None,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    # Confirmation buttons
+    confirm_markup = InlineKeyboardMarkup(preview_keyboard)
+    await update.message.reply_text(
+        "━━━━━━━━━━━━━━━━\n\n"
+        "✅ Looks good? Save it!\n"
+        "❌ Or cancel to start over.",
+        reply_markup=confirm_markup
+    )bot.send_video(
                 chat_id=update.effective_chat.id,
                 video=media,
                 caption=text if text else None,
@@ -621,7 +735,10 @@ async def confirm_save_message(query, context):
         'media_type': msg_data.get('media_type'),
         'buttons': msg_data.get('buttons', []),
         'interval': msg_data['interval'],
-        'last_sent': 0
+        'delete_previous': msg_data.get('delete_previous', False),
+        'pin_message': msg_data.get('pin_message', False),
+        'last_sent': 0,
+        'last_message_id': None
     }
     
     storage.add_recurring_message(chat_id, recurring_data)
@@ -630,14 +747,22 @@ async def confirm_save_message(query, context):
     del storage.temp_messages[user_id]
     context.user_data['state'] = None
     
+    settings_text = ""
+    if recurring_data['delete_previous']:
+        settings_text += "🗑 Will delete previous message\n"
+    if recurring_data['pin_message']:
+        settings_text += "📌 Will auto-pin message\n"
+    
     await query.answer("✅ Message saved!")
     await query.message.reply_text(
         f"🎉 *Recurring Message Saved!*\n\n"
         f"📢 Group: `{chat_id}`\n"
         f"⏱ Interval: Every {recurring_data['interval']} minutes\n"
         f"{'📸 With media' if recurring_data['media'] else '📝 Text only'}\n"
-        f"{'🔘 With buttons' if recurring_data['buttons'] else ''}\n\n"
-        f"The bot will start sending this message automatically!",
+        f"{'🔘 With buttons' if recurring_data['buttons'] else ''}\n"
+        f"{settings_text}\n"
+        f"The bot will start sending this message automatically!\n\n"
+        f"⚠️ *Important:* For pin feature, make sure bot has 'Pin Messages' permission!",
         parse_mode='Markdown'
     )
     
@@ -1011,6 +1136,16 @@ async def send_recurring_messages(context: ContextTypes.DEFAULT_TYPE):
             
             if current_time - last_sent >= interval_seconds:
                 try:
+                    # Delete previous message if option is enabled
+                    if msg_data.get('delete_previous') and msg_data.get('last_message_id'):
+                        try:
+                            await context.bot.delete_message(
+                                chat_id=chat_id,
+                                message_id=msg_data['last_message_id']
+                            )
+                        except Exception as e:
+                            print(f"Could not delete previous message: {e}")
+                    
                     # Build keyboard if buttons exist
                     keyboard = []
                     if msg_data.get('buttons'):
@@ -1023,10 +1158,11 @@ async def send_recurring_messages(context: ContextTypes.DEFAULT_TYPE):
                     text = msg_data.get('text')
                     media = msg_data.get('media')
                     media_type = msg_data.get('media_type')
+                    sent_message = None
                     
                     if media and media_type:
                         if media_type == 'photo':
-                            await context.bot.send_photo(
+                            sent_message = await context.bot.send_photo(
                                 chat_id=chat_id,
                                 photo=media,
                                 caption=text if text else None,
@@ -1034,7 +1170,7 @@ async def send_recurring_messages(context: ContextTypes.DEFAULT_TYPE):
                                 parse_mode='Markdown'
                             )
                         elif media_type == 'video':
-                            await context.bot.send_video(
+                            sent_message = await context.bot.send_video(
                                 chat_id=chat_id,
                                 video=media,
                                 caption=text if text else None,
@@ -1042,7 +1178,7 @@ async def send_recurring_messages(context: ContextTypes.DEFAULT_TYPE):
                                 parse_mode='Markdown'
                             )
                         elif media_type == 'animation':
-                            await context.bot.send_animation(
+                            sent_message = await context.bot.send_animation(
                                 chat_id=chat_id,
                                 animation=media,
                                 caption=text if text else None,
@@ -1050,13 +1186,27 @@ async def send_recurring_messages(context: ContextTypes.DEFAULT_TYPE):
                                 parse_mode='Markdown'
                             )
                     elif text:
-                        await context.bot.send_message(
+                        sent_message = await context.bot.send_message(
                             chat_id=chat_id,
                             text=text,
                             reply_markup=reply_markup,
                             parse_mode='Markdown'
                         )
                     
+                    # Pin message if option is enabled
+                    if sent_message and msg_data.get('pin_message'):
+                        try:
+                            await context.bot.pin_chat_message(
+                                chat_id=chat_id,
+                                message_id=sent_message.message_id,
+                                disable_notification=False  # Users get notification
+                            )
+                        except Exception as e:
+                            print(f"Could not pin message: {e}")
+                    
+                    # Store message ID and update timestamp
+                    if sent_message:
+                        msg_data["last_message_id"] = sent_message.message_id
                     msg_data["last_sent"] = current_time
                     storage.save_data()
                     
@@ -1065,8 +1215,17 @@ async def send_recurring_messages(context: ContextTypes.DEFAULT_TYPE):
 
 # Main function
 def main():
-    # Replace with your bot token
-    TOKEN = os.getenv("BOT_TOKEN")
+    # Get token from environment variable (Railway) or hardcode for testing
+    import os
+    TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN_HERE"
+    
+    if TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("❌ ERROR: Bot token not set!")
+        print("   Set BOT_TOKEN environment variable in Railway")
+        print("   Or replace 'YOUR_BOT_TOKEN_HERE' with your actual token")
+        return
+    
+    print(f"🔑 Using bot token: {TOKEN[:10]}...{TOKEN[-10:]}")
     
     application = Application.builder().token(TOKEN).build()
     
