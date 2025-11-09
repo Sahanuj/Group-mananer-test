@@ -7,7 +7,6 @@ Note: Use Python 3.9-3.12 (Python 3.13 has compatibility issues)
 
 import asyncio
 import json
-import os
 import re
 import base64
 from datetime import datetime
