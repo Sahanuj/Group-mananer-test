@@ -1,7 +1,8 @@
 """
 Advanced Telegram Group Moderation Bot with Media Support
-Requirements: python-telegram-bot==20.7
-Install: pip install python-telegram-bot==20.7
+Requirements: python-telegram-bot[job-queue]==21.5
+Install: pip install "python-telegram-bot[job-queue]==21.5"
+Note: Use Python 3.9-3.12 (Python 3.13 has compatibility issues)
 """
 
 import asyncio
