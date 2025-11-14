@@ -27,6 +27,7 @@ class BotStorage:
             "banned_words": {}, # group_id: [word1, word2...]
             "block_links": {}, # group_id: True/False
             "block_mentions": {}, # group_id: True/False
+            "auto_replies": {}, # group_id: {trigger: reply_message}
         }
         self.temp_messages = {} # user_id: {text, media, buttons, interval, chat_id, delete_previous, pin_message}
         self.load_data()
@@ -88,6 +89,20 @@ class BotStorage:
    
     def get_block_mentions(self, chat_id: str) -> bool:
         return self.data["block_mentions"].get(chat_id, False)
+    
+    def add_auto_reply(self, chat_id: str, trigger: str, reply: str):
+        if chat_id not in self.data["auto_replies"]:
+            self.data["auto_replies"][chat_id] = {}
+        self.data["auto_replies"][chat_id][trigger.lower()] = reply
+        self.save_data()
+    
+    def remove_auto_reply(self, chat_id: str, trigger: str):
+        if chat_id in self.data["auto_replies"]:
+            self.data["auto_replies"][chat_id].pop(trigger.lower(), None)
+            self.save_data()
+    
+    def get_auto_replies(self, chat_id: str) -> dict:
+        return self.data["auto_replies"].get(chat_id, {})
 
 # Initialize storage
 storage = BotStorage()
@@ -101,6 +116,15 @@ async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, cha
     except:
         return False
 
+# Admin check decorator
+def admin_only(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.message and update.message.chat.type != 'private':
+            await update.message.reply_text("⚠️ Please use this command in private chat with me!")
+            return
+        return await func(update, context)
+    return wrapper
+
 # Start command - Main menu
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != 'private':
@@ -110,6 +134,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("Recurring Messages", callback_data="menu_recurring")],
         [InlineKeyboardButton("Banned Words", callback_data="menu_banned_words")],
+        [InlineKeyboardButton("Auto Replies", callback_data="menu_auto_replies")],
         [InlineKeyboardButton("Link Blocking", callback_data="menu_links")],
         [InlineKeyboardButton("Mention Blocking", callback_data="menu_mentions")],
         [InlineKeyboardButton("Help", callback_data="menu_help")],
@@ -122,6 +147,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Features:\n"
         "• Rich recurring messages (text, media, buttons)\n"
         "• Banned words filter\n"
+        "• Auto replies (FAQ system)\n"
         "• Link blocking\n"
         "• Mention blocking\n\n"
         "All settings are per-group and can be managed by any group admin."
@@ -141,6 +167,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_recurring_menu(query, context)
     elif data == "menu_banned_words":
         await show_banned_words_menu(query, context)
+    elif data == "menu_auto_replies":
+        await show_auto_replies_menu(query, context)
     elif data == "menu_links":
         await show_links_menu(query, context)
     elif data == "menu_mentions":
@@ -190,6 +218,7 @@ async def show_main_menu(query, context):
     keyboard = [
         [InlineKeyboardButton("Recurring Messages", callback_data="menu_recurring")],
         [InlineKeyboardButton("Banned Words", callback_data="menu_banned_words")],
+        [InlineKeyboardButton("Auto Replies", callback_data="menu_auto_replies")],
         [InlineKeyboardButton("Link Blocking", callback_data="menu_links")],
         [InlineKeyboardButton("Mention Blocking", callback_data="menu_mentions")],
         [InlineKeyboardButton("Help", callback_data="menu_help")],
@@ -217,7 +246,9 @@ async def show_recurring_menu(query, context):
         "• Custom text (markdown supported)\n"
         "• Photos/Videos/GIFs\n"
         "• Inline buttons with URLs\n"
-        "• Live preview before saving\n\n"
+        "• Live preview before saving\n"
+        "• Auto-delete previous message\n"
+        "• Auto-pin messages\n\n"
         "Perfect for advertisements and announcements!\n\n"
         "Choose an action:"
     )
@@ -240,7 +271,7 @@ async def handle_recurring_action(query, context, data):
         }
        
         text = (
-            "*Step 1/5: Choose Group*\n\n"
+            "*Step 1/7: Choose Group*\n\n"
             "Send me the Chat ID of the group where you want this recurring message.\n\n"
             "Use `/chatid` command in your group to get the ID.\n\n"
             "Format: `-1001234567890`\n\n"
@@ -267,10 +298,10 @@ async def show_recurring_list(query, context):
             text += f"*Group:* `{chat_id}`\n"
             for i, msg in enumerate(messages):
                 msg_preview = msg.get('text', 'Media message')[:30]
-                has_media = "Photo" if msg.get('media') else "Text"
-                has_buttons = "Buttons" if msg.get('buttons') else ""
-                delete_prev = "Delete Prev" if msg.get('delete_previous') else ""
-                pin_msg = "Pin" if msg.get('pin_message') else ""
+                has_media = "📸" if msg.get('media') else "📝"
+                has_buttons = "🔘" if msg.get('buttons') else ""
+                delete_prev = "🗑" if msg.get('delete_previous') else ""
+                pin_msg = "📌" if msg.get('pin_message') else ""
                 text += f"{i+1}. {has_media}{has_buttons}{delete_prev}{pin_msg} Every {msg['interval']}min: {msg_preview}...\n"
                 keyboard.append([
                     InlineKeyboardButton(
@@ -281,11 +312,12 @@ async def show_recurring_list(query, context):
             text += "\n"
    
     if not has_messages:
-        text += "No-regexp recurring messages configured yet.\n\n"
+        text += "No recurring messages configured yet.\n\n"
         text += "Click 'Add New Message' to create one!"
     else:
-        text += "\n*Legend:* Photo = Has media | Buttons = Has buttons\n"
-        text += "Delete Prev = Deletes previous | Pin = Auto-pins\n"
+        text += "\n*Legend:*\n"
+        text += "📸 = Has media | 🔘 = Has buttons\n"
+        text += "🗑 = Deletes previous | 📌 = Auto-pins\n"
    
     keyboard.append([InlineKeyboardButton("Back", callback_data="menu_recurring")])
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -387,7 +419,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
            
             await update.message.reply_text(
                 "Group verified!\n\n"
-                "*Step 2/5: Message Text*\n\n"
+                "*Step 2/7: Message Text*\n\n"
                 "Now send me the text for your message.\n\n"
                 "You can use *markdown* formatting:\n"
                 "• `*bold*` for bold\n"
@@ -413,7 +445,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
        
         await update.message.reply_text(
-            "*Step 3/5: Media (Optional)*\n\n"
+            "*Step 3/7: Media (Optional)*\n\n"
             "Send me a photo, video, or GIF for your message.\n\n"
             "Or send 'skip' to continue without media.",
             reply_markup=reply_markup,
@@ -511,7 +543,7 @@ async def handle_media_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     reply_markup = InlineKeyboardMarkup(keyboard)
    
     await update.message.reply_text(
-        "*Step 4/5: Buttons (Optional)*\n\n"
+        "*Step 4/7: Buttons (Optional)*\n\n"
         "Add inline buttons to your message!\n\n"
         "Format (one per line):\n"
         "`Button Text|https://url.com`\n"
@@ -522,7 +554,6 @@ async def handle_media_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     context.user_data['state'] = 'waiting_buttons'
 
-# FIXED: show_preview – only ONE media-sending block
 async def show_preview(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     msg_data = storage.temp_messages[user_id]
    
@@ -547,15 +578,15 @@ async def show_preview(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
    
     settings_info = ""
     if delete_prev:
-        settings_info += "Deletes previous message\n"
+        settings_info += "🗑 Deletes previous message\n"
     if pin_msg:
-        settings_info += "Auto-pins message\n"
+        settings_info += "📌 Auto-pins message\n"
    
     await update.message.reply_text(
         f"*PREVIEW MODE*\n\n"
-        f"Interval: Every {interval} minutes\n"
-        f"{'Media: Yes' if media else 'Text only'}\n"
-        f"{'Buttons: Yes' if buttons else ''}\n"
+        f"⏱ Interval: Every {interval} minutes\n"
+        f"{'📸 Media: Yes' if media else '📝 Text only'}\n"
+        f"{'🔘 Buttons: Yes' if buttons else ''}\n"
         f"{settings_info}\n"
         f"━━━━━━━━━━━━━━━━",
         parse_mode='Markdown'
@@ -563,7 +594,6 @@ async def show_preview(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
    
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
    
-    # SEND MESSAGE – ONLY ONCE!
     if media:
         if media_type == 'photo':
             await context.bot.send_photo(
@@ -622,6 +652,8 @@ async def show_preview_from_callback(query, context, user_id: int):
     media_type = msg_data.get('media_type')
     buttons = msg_data.get('buttons', [])
     interval = msg_data.get('interval')
+    delete_prev = msg_data.get('delete_previous', False)
+    pin_msg = msg_data.get('pin_message', False)
    
     keyboard = []
     if buttons:
@@ -633,11 +665,18 @@ async def show_preview_from_callback(query, context, user_id: int):
         [InlineKeyboardButton("Cancel", callback_data="menu_recurring")]
     ]
    
+    settings_info = ""
+    if delete_prev:
+        settings_info += "🗑 Deletes previous message\n"
+    if pin_msg:
+        settings_info += "📌 Auto-pins message\n"
+   
     await query.message.reply_text(
         f"*PREVIEW MODE*\n\n"
-        f"Interval: Every {interval} minutes\n"
-        f"{'Media: Yes' if media else 'Text only'}\n"
-        f"{'Buttons: Yes' if buttons else ''}\n\n"
+        f"⏱ Interval: Every {interval} minutes\n"
+        f"{'📸 Media: Yes' if media else '📝 Text only'}\n"
+        f"{'🔘 Buttons: Yes' if buttons else ''}\n"
+        f"{settings_info}\n"
         f"━━━━━━━━━━━━━━━━",
         parse_mode='Markdown'
     )
@@ -715,20 +754,20 @@ async def confirm_save_message(query, context):
    
     settings_text = ""
     if recurring_data['delete_previous']:
-        settings_text += "Will delete previous message\n"
+        settings_text += "🗑 Will delete previous message\n"
     if recurring_data['pin_message']:
-        settings_text += "Will auto-pin message\n"
+        settings_text += "📌 Will auto-pin message\n"
    
     await query.answer("Message saved!")
     await query.message.reply_text(
         f"*Recurring Message Saved!*\n\n"
-        f"Group: `{chat_id}`\n"
-        f"Interval: Every {recurring_data['interval']} minutes\n"
-        f"{'With media' if recurring_data['media'] else 'Text only'}\n"
-        f"{'With buttons' if recurring_data['buttons'] else ''}\n"
+        f"📢 Group: `{chat_id}`\n"
+        f"⏱ Interval: Every {recurring_data['interval']} minutes\n"
+        f"{'📸 With media' if recurring_data['media'] else '📝 Text only'}\n"
+        f"{'🔘 With buttons' if recurring_data['buttons'] else ''}\n"
         f"{settings_text}\n"
         f"The bot will start sending this message automatically!\n\n"
-        f"*Important:* For pin feature, make sure bot has 'Pin Messages' permission!",
+        f"⚠️ *Important:* For pin feature, make sure bot has 'Pin Messages' permission!",
         parse_mode='Markdown'
     )
    
@@ -751,11 +790,36 @@ async def show_banned_words_menu(query, context):
    
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
+async def show_auto_replies_menu(query, context):
+    text = (
+        "🤖 *Auto Replies (FAQ System)*\n\n"
+        "Bot automatically replies when users say specific words!\n\n"
+        "*How it works:*\n"
+        "User: `hello`\n"
+        "Bot: `Hello! Welcome to our group!`\n\n"
+        "*Commands:*\n"
+        "• `/addreply <chat_id> <trigger> | <reply>` - Add auto reply\n"
+        "• `/delreply <chat_id> <trigger>` - Remove auto reply\n"
+        "• `/listreplies <chat_id>` - Show all auto replies\n\n"
+        "*Example:*\n"
+        "`/addreply -1001234567890 hello | Hello! Welcome!`\n"
+        "`/addreply -1001234567890 price | Check our website!`\n\n"
+        "*Tips:*\n"
+        "• Use for FAQs, greetings, common questions\n"
+        "• Trigger is case-insensitive\n"
+        "• Bot replies instantly!"
+    )
+   
+    keyboard = [[InlineKeyboardButton("Back", callback_data="back_main")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+   
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
 async def show_links_menu(query, context):
     keyboard = []
    
     for chat_id in storage.data.get("block_links", {}).keys():
-        status = "ON" if storage.data["block_links"][chat_id] else "OFF"
+        status = "🟢 ON" if storage.data["block_links"][chat_id] else "🔴 OFF"
         keyboard.append([
             InlineKeyboardButton(
                 f"{status} Group {chat_id}",
@@ -779,7 +843,7 @@ async def show_mentions_menu(query, context):
     keyboard = []
    
     for chat_id in storage.data.get("block_mentions", {}).keys():
-        status = "ON" if storage.data["block_mentions"][chat_id] else "OFF"
+        status = "🟢 ON" if storage.data["block_mentions"][chat_id] else "🔴 OFF"
         keyboard.append([
             InlineKeyboardButton(
                 f"{status} Group {chat_id}",
@@ -803,41 +867,40 @@ async def toggle_link_blocking(query, context, data):
     chat_id = data.replace("toggle_links_", "")
     current = storage.get_block_links(chat_id)
     storage.set_block_links(chat_id, not current)
-    await query.answer(f"Link blocking {'enabled' if not current else 'disabled'}!")
+    await query.answer(f"✅ Link blocking {'enabled' if not current else 'disabled'}!")
     await show_links_menu(query, context)
 
 async def toggle_mention_blocking(query, context, data):
     chat_id = data.replace("toggle_mentions_", "")
     current = storage.get_block_mentions(chat_id)
     storage.set_block_mentions(chat_id, not current)
-    await query.answer(f"Mention blocking {'enabled' if not current else 'disabled'}!")
+    await query.answer(f"✅ Mention blocking {'enabled' if not current else 'disabled'}!")
     await show_mentions_menu(query, context)
 
 async def show_help(query, context):
     text = (
-        "*Bot Help & Setup Guide*\n\n"
-        "*Setup Steps:*\n"
+        "ℹ️ *Bot Help & Setup Guide*\n\n"
+        "*📋 Setup Steps:*\n"
         "1. Add bot to your group\n"
         "2. Make bot admin (Delete Messages permission)\n"
         "3. Use `/chatid` in group to get Chat ID\n"
         "4. Configure in private chat with bot\n\n"
-        "*Recurring Messages:*\n"
-        "Create rich messages with text, media, and buttons!\n"
-        "• Step-by-step wizard\n"
-        "• Live preview before saving\n"
-        "• Markdown formatting supported\n\n"
-        "*All Commands:*\n"
+        "*🔁 Recurring Messages:*\n"
+        "Create rich messages with text, media, and buttons!\n\n"
+        "*🤖 Auto Replies:*\n"
+        "Set up automatic responses to common questions!\n\n"
+        "*⚙️ All Commands:*\n"
         "• `/start` - Control panel\n"
         "• `/chatid` - Get group ID\n"
         "• `/addword <id> <word>` - Ban word\n"
         "• `/delword <id> <word>` - Unban word\n"
         "• `/listwords <id>` - Show banned words\n"
+        "• `/addreply <id> <trigger> | <reply>` - Add auto reply\n"
+        "• `/delreply <id> <trigger>` - Remove auto reply\n"
+        "• `/listreplies <id>` - Show auto replies\n"
         "• `/setlinks <id> <on/off>` - Toggle links\n"
         "• `/setmentions <id> <on/off>` - Toggle mentions\n\n"
-        "*Button Format:*\n"
-        "`Button Text|https://url.com`\n"
-        "`Visit Site|https://example.com`\n\n"
-        "All group admins can manage settings!"
+        "✨ All group admins can manage settings!"
     )
    
     keyboard = [[InlineKeyboardButton("Back", callback_data="back_main")]]
@@ -852,23 +915,20 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
    
     if chat_type == 'private':
         await update.message.reply_text(
-            f"*Your User ID:* `{chat_id}`\n\n"
+            f"📋 *Your User ID:* `{chat_id}`\n\n"
             "To get a group's ID, use this command in that group!",
             parse_mode='Markdown'
         )
     else:
         await update.message.reply_text(
-            f"*Group Chat ID:* `{chat_id}`\n\n"
+            f"📋 *Group Chat ID:* `{chat_id}`\n\n"
             "Use this ID in bot commands to configure settings.",
             parse_mode='Markdown'
         )
 
 # Add banned word
+@admin_only
 async def add_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.type != 'private':
-        await update.message.reply_text("Use this command in private chat!")
-        return
-   
     try:
         chat_id = context.args[0]
         word = ' '.join(context.args[1:])
@@ -876,12 +936,12 @@ async def add_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Verify user is admin
         is_admin = await is_group_admin(update, context, int(chat_id))
         if not is_admin:
-            await update.message.reply_text("You must be admin in that group!")
+            await update.message.reply_text("⚠️ You must be admin in that group!")
             return
        
         storage.add_banned_word(chat_id, word)
         await update.message.reply_text(
-            f"*Banned word added!*\n\n"
+            f"✅ *Banned word added!*\n\n"
             f"Word: `{word}`\n"
             f"Group: `{chat_id}`\n\n"
             f"Messages containing this word will be deleted.",
@@ -889,62 +949,56 @@ async def add_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except IndexError:
         await update.message.reply_text(
-            "*Usage:*\n"
+            "❌ *Usage:*\n"
             "`/addword <chat_id> <word>`\n\n"
             "*Example:*\n"
             "`/addword -1001234567890 scam`",
             parse_mode='Markdown'
         )
     except Exception as e:
-        await update.message.reply_text(f"Error: {str(e)}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 # Remove banned word
+@admin_only
 async def del_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.type != 'private':
-        await update.message.reply_text("Use this command in private chat!")
-        return
-   
     try:
         chat_id = context.args[0]
         word = ' '.join(context.args[1:])
        
         is_admin = await is_group_admin(update, context, int(chat_id))
         if not is_admin:
-            await update.message.reply_text("You must be admin in that group!")
+            await update.message.reply_text("⚠️ You must be admin in that group!")
             return
        
         storage.remove_banned_word(chat_id, word)
         await update.message.reply_text(
-            f"*Banned word removed!*\n\n"
+            f"✅ *Banned word removed!*\n\n"
             f"Word: `{word}`\n"
             f"Group: `{chat_id}`",
             parse_mode='Markdown'
         )
     except IndexError:
         await update.message.reply_text(
-            "*Usage:*\n"
+            "❌ *Usage:*\n"
             "`/delword <chat_id> <word>`",
             parse_mode='Markdown'
         )
 
 # List banned words
+@admin_only
 async def list_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.type != 'private':
-        await update.message.reply_text("Use this command in private chat!")
-        return
-   
     try:
         chat_id = context.args[0]
        
         is_admin = await is_group_admin(update, context, int(chat_id))
         if not is_admin:
-            await update.message.reply_text("You must be admin in that group!")
+            await update.message.reply_text("⚠️ You must be admin in that group!")
             return
        
         words = storage.get_banned_words(chat_id)
        
         if words:
-            text = f"*Banned words for* `{chat_id}`:\n\n"
+            text = f"🚫 *Banned words for* `{chat_id}`:\n\n"
             for i, word in enumerate(words, 1):
                 text += f"{i}. `{word}`\n"
             text += f"\n*Total: {len(words)} words*"
@@ -954,38 +1008,135 @@ async def list_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, parse_mode='Markdown')
     except IndexError:
         await update.message.reply_text(
-            "*Usage:*\n"
+            "❌ *Usage:*\n"
             "`/listwords <chat_id>`",
             parse_mode='Markdown'
         )
 
+# Add auto reply
+@admin_only
+async def add_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        # Parse: /addreply <chat_id> <trigger> | <reply>
+        args_text = ' '.join(context.args)
+        chat_id, rest = args_text.split(' ', 1)
+       
+        if '|' not in rest:
+            raise ValueError("Missing | separator")
+       
+        trigger, reply = rest.split('|', 1)
+        trigger = trigger.strip()
+        reply = reply.strip()
+       
+        # Verify user is admin
+        is_admin = await is_group_admin(update, context, int(chat_id))
+        if not is_admin:
+            await update.message.reply_text("⚠️ You must be admin in that group!")
+            return
+       
+        storage.add_auto_reply(chat_id, trigger, reply)
+        await update.message.reply_text(
+            f"✅ *Auto reply added!*\n\n"
+            f"Trigger: `{trigger}`\n"
+            f"Reply: `{reply}`\n"
+            f"Group: `{chat_id}`\n\n"
+            f"Now when users say '{trigger}', bot will reply!",
+            parse_mode='Markdown'
+        )
+    except (IndexError, ValueError):
+        await update.message.reply_text(
+            "❌ *Usage:*\n"
+            "`/addreply <chat_id> <trigger> | <reply>`\n\n"
+            "*Example:*\n"
+            "`/addreply -1001234567890 hello | Hello! Welcome!`\n"
+            "`/addreply -1001234567890 price | Visit our website!`",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+# Delete auto reply
+@admin_only
+async def del_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = context.args[0]
+        trigger = ' '.join(context.args[1:])
+       
+        is_admin = await is_group_admin(update, context, int(chat_id))
+        if not is_admin:
+            await update.message.reply_text("⚠️ You must be admin in that group!")
+            return
+       
+        storage.remove_auto_reply(chat_id, trigger)
+        await update.message.reply_text(
+            f"✅ *Auto reply removed!*\n\n"
+            f"Trigger: `{trigger}`\n"
+            f"Group: `{chat_id}`",
+            parse_mode='Markdown'
+        )
+    except IndexError:
+        await update.message.reply_text(
+            "❌ *Usage:*\n"
+            "`/delreply <chat_id> <trigger>`\n\n"
+            "*Example:*\n"
+            "`/delreply -1001234567890 hello`",
+            parse_mode='Markdown'
+        )
+
+# List auto replies
+@admin_only
+async def list_replies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = context.args[0]
+       
+        is_admin = await is_group_admin(update, context, int(chat_id))
+        if not is_admin:
+            await update.message.reply_text("⚠️ You must be admin in that group!")
+            return
+       
+        replies = storage.get_auto_replies(chat_id)
+       
+        if replies:
+            text = f"🤖 *Auto replies for* `{chat_id}`:\n\n"
+            for i, (trigger, reply) in enumerate(replies.items(), 1):
+                reply_preview = reply[:50] + "..." if len(reply) > 50 else reply
+                text += f"{i}. `{trigger}` → {reply_preview}\n\n"
+            text += f"*Total: {len(replies)} replies*"
+        else:
+            text = f"No auto replies for group `{chat_id}`"
+       
+        await update.message.reply_text(text, parse_mode='Markdown')
+    except IndexError:
+        await update.message.reply_text(
+            "❌ *Usage:*\n"
+            "`/listreplies <chat_id>`",
+            parse_mode='Markdown'
+        )
+
 # Set link blocking
+@admin_only
 async def set_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.type != 'private':
-        await update.message.reply_text("Use this command in private chat!")
-        return
-   
     try:
         chat_id = context.args[0]
         enabled = context.args[1].lower() in ['on', 'true', '1', 'yes', 'enable']
        
         is_admin = await is_group_admin(update, context, int(chat_id))
         if not is_admin:
-            await update.message.reply_text("You must be admin in that group!")
+            await update.message.reply_text("⚠️ You must be admin in that group!")
             return
        
         storage.set_block_links(chat_id, enabled)
-        status = "ENABLED" if enabled else "DISABLED"
+        status = "🟢 ENABLED" if enabled else "🔴 DISABLED"
        
         await update.message.reply_text(
-            f"*Link blocking {status}*\n\n"
+            f"✅ *Link blocking {status}*\n\n"
             f"Group: `{chat_id}`\n\n"
             f"{'All links from non-admins will be deleted!' if enabled else 'Links are now allowed.'}",
             parse_mode='Markdown'
         )
     except IndexError:
         await update.message.reply_text(
-            "*Usage:*\n"
+            "❌ *Usage:*\n"
             "`/setlinks <chat_id> <on/off>`\n\n"
             "*Example:*\n"
             "`/setlinks -1001234567890 on`",
@@ -993,32 +1144,29 @@ async def set_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # Set mention blocking
+@admin_only
 async def set_mentions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.type != 'private':
-        await update.message.reply_text("Use this command in private chat!")
-        return
-   
     try:
         chat_id = context.args[0]
         enabled = context.args[1].lower() in ['on', 'true', '1', 'yes', 'enable']
        
         is_admin = await is_group_admin(update, context, int(chat_id))
         if not is_admin:
-            await update.message.reply_text("You must be admin in that group!")
+            await update.message.reply_text("⚠️ You must be admin in that group!")
             return
        
         storage.set_block_mentions(chat_id, enabled)
-        status = "ENABLED" if enabled else "DISABLED"
+        status = "🟢 ENABLED" if enabled else "🔴 DISABLED"
        
         await update.message.reply_text(
-            f"*Mention blocking {status}*\n\n"
+            f"✅ *Mention blocking {status}*\n\n"
             f"Group: `{chat_id}`\n\n"
             f"{'@username mentions from non-admins will be deleted!' if enabled else 'Mentions are now allowed.'}",
             parse_mode='Markdown'
         )
     except IndexError:
         await update.message.reply_text(
-            "*Usage:*\n"
+            "❌ *Usage:*\n"
             "`/setmentions <chat_id> <on/off>`",
             parse_mode='Markdown'
         )
@@ -1039,14 +1187,25 @@ async def filter_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         is_admin_user = False
    
-    # Admins bypass all filters
+    text = message.text or message.caption or ""
+    text_lower = text.lower()
+   
+    # Check for auto replies FIRST (works for everyone including admins)
+    auto_replies = storage.get_auto_replies(chat_id)
+    for trigger, reply in auto_replies.items():
+        if trigger in text_lower:
+            try:
+                await message.reply_text(reply, parse_mode='Markdown')
+            except:
+                await message.reply_text(reply)  # Fallback without markdown
+            break  # Only reply once per message
+   
+    # Admins bypass deletion filters (but not auto-replies above)
     if is_admin_user:
         return
    
     should_delete = False
     reason = ""
-   
-    text = message.text or message.caption or ""
    
     # Check for links
     if storage.get_block_links(chat_id):
@@ -1055,22 +1214,21 @@ async def filter_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
        
         if re.search(url_pattern, text, re.IGNORECASE) or re.search(tg_pattern, text, re.IGNORECASE):
             should_delete = True
-            reason = "links"
+            reason = "🔗 links"
    
     # Check for mentions
     if storage.get_block_mentions(chat_id) and not should_delete:
         if re.search(r'@\w+', text):
             should_delete = True
-            reason = "mentions"
+            reason = "📢 mentions"
    
     # Check for banned words
     if not should_delete:
         banned_words = storage.get_banned_words(chat_id)
-        text_lower = text.lower()
         for word in banned_words:
             if word in text_lower:
                 should_delete = True
-                reason = f"banned word"
+                reason = f"🚫 banned word"
                 break
    
     # Delete if necessary
@@ -1080,7 +1238,7 @@ async def filter_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Send temporary warning
             warning = await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"Message deleted ({reason})",
+                text=f"⚠️ Message deleted ({reason})",
                 reply_to_message_id=None
             )
             await asyncio.sleep(3)
@@ -1185,11 +1343,12 @@ def main():
     TOKEN = os.getenv("BOT_TOKEN") or "YOUR_BOT_TOKEN_HERE"
    
     if TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("ERROR: Bot token not set!")
-        print(" Set BOT_TOKEN environment variable")
+        print("❌ ERROR: Bot token not set!")
+        print("   Set BOT_TOKEN environment variable in Railway")
+        print("   Or replace 'YOUR_BOT_TOKEN_HERE' with your actual token")
         return
    
-    print(f"Using bot token: {TOKEN[:10]}...{TOKEN[-10:]}")
+    print(f"🔑 Using bot token: {TOKEN[:10]}...{TOKEN[-10:]}")
    
     application = Application.builder().token(TOKEN).build()
    
@@ -1199,6 +1358,9 @@ def main():
     application.add_handler(CommandHandler("addword", add_word))
     application.add_handler(CommandHandler("delword", del_word))
     application.add_handler(CommandHandler("listwords", list_words))
+    application.add_handler(CommandHandler("addreply", add_reply))
+    application.add_handler(CommandHandler("delreply", del_reply))
+    application.add_handler(CommandHandler("listreplies", list_replies))
     application.add_handler(CommandHandler("setlinks", set_links))
     application.add_handler(CommandHandler("setmentions", set_mentions))
    
@@ -1228,15 +1390,17 @@ def main():
     job_queue.run_repeating(send_recurring_messages, interval=30, first=10)
    
     # Start bot
-    print("Bot is running...")
-    print("Features:")
-    print(" Rich recurring messages (text, media, buttons)")
-    print(" Live preview before saving")
-    print(" Banned words filter")
-    print(" Link & mention blocking")
-    print(" Multi-admin support")
-    print(" User-friendly panel")
-    print("\nSend /start in private chat to configure!")
+    print("🤖 Bot is running...")
+    print("📋 Features:")
+    print("   ✅ Rich recurring messages (text, media, buttons)")
+    print("   ✅ Auto-delete previous & auto-pin")
+    print("   ✅ Live preview before saving")
+    print("   ✅ Banned words filter")
+    print("   ✅ Auto replies (FAQ system)")
+    print("   ✅ Link & mention blocking")
+    print("   ✅ Multi-admin support")
+    print("   ✅ User-friendly panel")
+    print("\n⚙️  Send /start in private chat to configure!")
    
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
